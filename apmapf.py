@@ -28,7 +28,10 @@ import json
 import math
 import logging
 import timeout_decorator
-sys.stderr = open(os.devnull, 'w')
+
+# We don't care about errors thrown during import of pysmt.shortcuts.
+sys.stderr = open(os.devnull, 'w') 
+
 from pysmt.shortcuts import (
     Symbol,
     Int,
@@ -40,19 +43,24 @@ from pysmt.shortcuts import (
     Not,
     Implies,
     Equals)
+
 from pysmt.typing import INT
+
 sys.stderr = sys.__stderr__
+
 from bfs import BFS
 
-
+# absolute value of x = Ite(x >= 0, x, -x) = if x >= 0 then x else -x
 def Abs(x):
     return Ite(x >= 0, x, -x)
 
-
+# c0, c1 are "adjacent" iff d_x(c0, c1) + d_y(c0, c1) <= 1.
+# That is, if their Manhattan distance is <= 1. 
 def Adj(c0, c1):
     return 1 >= Abs(c1[0] - c0[0]) + Abs(c1[1] - c0[1])
 
-
+# coord is on the grid iff its x, y coordinates are bounded below by the origin
+# (0, 0), and above by the width = height of the (square) grid.
 def IsOnGrid(coord, gridsize):
     return And(
         coord[0] >= 0,
@@ -60,31 +68,54 @@ def IsOnGrid(coord, gridsize):
         coord[0] < gridsize,
         coord[1] < gridsize)
 
-
+# The path is connected iff each point in the path is adjacent to its
+# predecessor (if it has one) and successor (if it has one).
 def IsConnected(path):
     return And([Adj(path[i-1], path[i]) for i in range(1, len(path))])
 
-
+# c0 is literally the same position as c1 if their x and y coordinates are both
+# equal.
 def SamePosition(c0, c1):
     return And(Equals(c0[0], c1[0]), Equals(c0[1], c1[1]))
 
-
+# IntifyCoords takes a vector art in (R^2)^n and returns the closest vector to
+# it in (Z^2)^n.
 def IntifyCoords(ary):
     return [[Int(c0), Int(c1)] for c0, c1 in ary]
 
-
+# IsPlan decides if a plan is valid.  It takes 5 inputs:
+#   plan      = (x_i)_{i=1}^R := a set of T-length paths <x_i^1,...,x_i^T>.    
+#   gridsize  = sqrt(|W|)     := some integer 0 < n, s.t. W = Z_n x Z_n.
+#   starts    = (S_i)_{i=1}^R := the initial locations occupied by the robots
+#   goals     = (G_i)_{i=1}^R := the set of goal locations of the robots
+#   obstacles = Omega         := the set of obstacles in the world.
 def IsPlan(plan, gridsize, starts, goals, obstacles):
-    starts = IntifyCoords(starts)
-    goals = IntifyCoords(goals)
+
+    # Begin by snapping all coordinates to N x N space.  This is correct 
+    # according to the problem formulation given in Definition 1
+    starts    = IntifyCoords(starts)
+    goals     = IntifyCoords(goals)
     obstacles = IntifyCoords(obstacles)
 
-    bounds = And([And([IsOnGrid(step, gridsize) for step in path])
-                  for path in plan])
-    adjacency = And([IsConnected(path) for path in plan])
+    # (1) A i in N_R : x_i^1 = S_i
     init = And([SamePosition(path[0], starts[i])
                 for i, path in enumerate(plan)])
+
+    # (2) A i in N_r : A t in N_T : x_i^t in W = Z_n x Z_n
+    bounds = And([And([IsOnGrid(step, gridsize) for step in path])
+                  for path in plan])
+
+    # (3) A i in N_R : A t in N_{T-1} : E u in U : delta(x_i^t, u) = x_i^{t+1}
+    # Note this isn't exactly the same, but it's morally equivalent, just
+    # modulo the knowledge of the function delta.
+    adjacency = And([IsConnected(path) for path in plan])
+
+    # (4) A i in N_R : E t in N_T : G_i in x_i^T
     reach = And([Or([SamePosition(coord, goals[i]) for coord in path])
                  for i, path in enumerate(plan)])
+
+    # (5) A (i, j) in N_R x N_R : A t in N_T : 
+    #       x_i^t \cap x_j^t \neq \emptyset => i = j
     avoid = And([
                  Implies(
                      SamePosition(plan[i][k],
@@ -93,12 +124,15 @@ def IsPlan(plan, gridsize, starts, goals, obstacles):
                             Int(j)))
                  for k in range(len(plan[0]))
                  for i in range(len(plan)) for j in range(len(plan))])
+
+    # (6) A i in N_R : A t in N_T : x_i^t \cap \Omega = \emptyset
     obstacles = And([Not(SamePosition(coord, obstacle))
                      for path in plan
                      for coord in path
                      for obstacle in obstacles])
 
-    return And(bounds, adjacency, init, reach, avoid, obstacles)
+    # valid(x) = (1) ^  (2)  ^   (3)   ^   (4)  ^  (5)  ^  (6)
+    return And(init, bounds, adjacency, reach, avoid, obstacles)
 
 
 def IsAttack(attack, plan, gridsize, obstacles, safes):
