@@ -2,6 +2,7 @@ __copyright__ = """
     Copyright 2020 Boston University Board of Trustees
 
     Author: Kacper Wardega
+    Contributors: Max von Hippel
 """
 
 __license__ = """
@@ -29,7 +30,7 @@ import math
 import logging
 import timeout_decorator
 
-# We don't care about errors thrown during import of pysmt.shortcuts.
+# We don't care about errors thrown during import of pysmt.*.
 sys.stderr = open(os.devnull, 'w') 
 
 from pysmt.shortcuts import (
@@ -46,11 +47,12 @@ from pysmt.shortcuts import (
 
 from pysmt.typing import INT
 
+# Return to showing errors again.
 sys.stderr = sys.__stderr__
 
 from bfs import BFS
 
-# absolute value of x = Ite(x >= 0, x, -x) = if x >= 0 then x else -x
+# Absolute value of x = Ite(x >= 0, x, -x) = if x >= 0 then x else -x
 def Abs(x):
     return Ite(x >= 0, x, -x)
 
@@ -134,16 +136,35 @@ def IsPlan(plan, gridsize, starts, goals, obstacles):
     # valid(x) = (1) ^  (2)  ^   (3)   ^   (4)  ^  (5)  ^  (6)
     return And(init, bounds, adjacency, reach, avoid, obstacles)
 
-
+# Takes as inputs attack, plan, gridsize, obstacles, safes; where:
+# 
+#   > attack is a finite list of coordinates on Z_gridsize x Z_gridsize;
+#   > plan consists of paths (like attack) for all the non-adversarial bots;
+#   > the attack and the paths in plan are over the space Z_gridsize x Z_gridsize;
+#   > obstacles is a set of "off-limits" grid coordinates where no bot (or 
+#     attacker can go; and
+#   > safes is a set of coordinates the attacker may pass through undetected.
+# 
+# Returns the attack validity, i.e., (1) ^ (2) ^ (3) ^ (4) ^ (5) ^ (6) ^ (7).
 def IsAttack(attack, plan, gridsize, obstacles, safes):
     obstacles = IntifyCoords(obstacles)
     safes = IntifyCoords(safes)
 
+    # (1) All attack moves are in Z_gridsize x Z_gridsize.
     bounds = And([IsOnGrid(step, gridsize) for step in attack])
+
+    # (2) The attacker never moves more than 1 grid-square at a time.
     adjacency = IsConnected(attack)
+
+    # (3) The attack begins in the same place as some path in the plan.
     init = Or([SamePosition(path[0], attack[0]) for path in plan])
+
+    # (4) The attack enters a "safe" zone at some point.
     reach = Or([SamePosition(coord, safe)
                 for coord in attack for safe in safes])
+    
+    # (5) The attack does not cross paths with any plans other than the one it
+    #     replaces.
     avoid = And([
                  Implies(
                      SamePosition(path[i],
@@ -151,10 +172,16 @@ def IsAttack(attack, plan, gridsize, obstacles, safes):
                      SamePosition(path[0],
                                   attack[0]))
                  for i in range(len(attack)) for path in plan])
+    
+    # (6) The attack never runs into any obstacle.
     obstacles = And(
         [Not(SamePosition(coord, obstacle))
          for coord in attack for obstacle in obstacles])
-    # i is the attacker, j the observer, k the timestep
+
+    # (7) Any time the attack is adjascent to some plan p, it is in the same 
+    #     place as another plan p' and therefore could be mistaken for the
+    #     innocent plan p'.
+    #     i is the attacker, j the observer, k the time-step.
     undetected = And([Implies(SamePosition(plan[i][0], attack[0]),
                               And([
                                   And(
@@ -185,12 +212,16 @@ class GridWorld():
         logging.log(logging.INFO, 'Accepted by solver.')
 
     def run(self):
-        R = len(self.content['starts'])        # robots
-        N = self.content['N']        # grid size
+        R = len(self.content['starts']) # robots
+        N = self.content['N']           # grid size
 
+        # We use a breadth-first search to determine the horizon, i.e., 
+        # upper complexity bound, of the problem, based on the maximum distance
+        # of a goal from the start positions of the paths.
         distance_to_target = []
         bfs = BFS(N, self.content['starts'],
                   self.content['obstacles'])
+
         for i, source in enumerate(bfs.starts):
             bfs.search(source)
             distance_to_target.append(
@@ -199,16 +230,26 @@ class GridWorld():
         H_MIN = max(distance_to_target)  # horizon
         H_MAX = int(H_MIN * self.h_mult)
         H_MAX_ORIG = H_MAX
-        logging.log(logging.INFO, 'BFS lower bound: {}.'.format(H_MIN))
-        logging.log(logging.INFO, 'Setting H_MAX to h_mult * {}: {}'.format(H_MIN, H_MAX))
+
+        logging.log(logging.INFO, 
+                    'BFS lower bound: {}.'.format(H_MIN))
+
+        logging.log(logging.INFO, 
+                    'Setting H_MAX to h_mult * {}: {}'.format(H_MIN, H_MAX))
+
         if self.search == 'binary':
             H = (H_MAX - H_MIN) // 2 + H_MIN
         elif self.search == 'linear':
             H = H_MIN
         else:
-            logging.log(logging.ERROR, 'Search method is not one of "linear", "binary".')
+            logging.log(logging.ERROR, 
+                        'Search method is not one of "linear", "binary".')
             exit()
+        
         logging.log(logging.INFO, 'Beginning search with horizon: {}'.format(H))
+        
+        # H denotes the complexity we have checked 'up to', and H_MAX the
+        # complexity at which we can terminate.
         while H < H_MAX:
             # make the EF-SMT instance here
             plan = [[[Symbol('p_%d^%d-0' %
@@ -220,6 +261,11 @@ class GridWorld():
                                               i, INT)]
                       for i in range(H)]
 
+            # formula says that forall components of all coordinates in the
+            # attack, the plan is a valid plan, but the attack is not a valid
+            # attack.  So, a violation (which z3 would detect) would mean an
+            # attack.
+            # @Kacper can you double check this logic?
             formula = ForAll([symvar for coordinate in attack
                               for symvar in coordinate],
                              And(IsPlan(plan,
@@ -237,19 +283,24 @@ class GridWorld():
                 model = self.get_model(formula)
             except timeout_decorator.TimeoutError:
                 model = None
+            # If a model, i.e., a satisfaction of the formula, is recoverable,
+            # then we produce the solution.  This is of course within the H_MAX
+            # complexity bound.
             if model:
                 control = [[[model.get_py_value(plan[i][j][0]),
                              model.get_py_value(plan[i][j][1])]
                             for j in range(H)] for i in range(R)]
                 self.content['control'] = list(zip(*control))
-                logging.log(logging.INFO, 'Found solution for horizon: {}'.format(H))
+                logging.log(logging.INFO, 
+                            'Found solution for horizon: {}'.format(H))
                 if self.search == 'linear':
                     break
                 else:
                     H_MAX = H
                     H = (H_MAX - H_MIN) // 2 + H_MIN
             else:
-                logging.log(logging.INFO, 'UNSAT for H={}, updating H.'.format(H))
+                logging.log(logging.INFO, 
+                            'UNSAT for H={}, updating H.'.format(H))
                 if self.search == 'linear':
                     H += 1
                 else:
@@ -264,21 +315,49 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(prog='APMAPF',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('experiment', help='Experiment json path')
-    parser.add_argument('-t', '--timeout', help='Assume UNSAT for a given horizon after timeout (s)', default=0, type=int)
-    parser.add_argument('-v', '--verbosity', help='Verbosity level', default=2, type=int)
-    parser.add_argument('-m', help='Horizon multiplier', default=2.0, type=float)
-    parser.add_argument('-s', '--search', help='Path length optimization strategy.', default='linear', choices=['linear','binary'])
+
+    timeoutHelp = 'Assume UNSAT for a given horizon after timeout (s)'
+    searchHelp  = 'Path length optimization strategy.'
+    
+    # Self-explanatory.
+    parser.add_argument('experiment', 
+                        help='Experiment json path')
+    parser.add_argument('-t', 
+                        '--timeout', 
+                        help=timeoutHelp, 
+                        default=0, 
+                        type=int)
+    parser.add_argument('-v', 
+                        '--verbosity', 
+                        help='Verbosity level', 
+                        default=2, 
+                        type=int)
+    parser.add_argument('-m', 
+                        help='Horizon multiplier', 
+                        default=2.0, 
+                        type=float)
+    parser.add_argument('-s', 
+                        '--search', 
+                        help=searchHelp, 
+                        default='linear', 
+                        choices=['linear','binary'])
+    
     # DEBUG, INFO, WARNING, ERROR, CRITICAL
     args = parser.parse_args()
-    logging.basicConfig(level=10*args.verbosity, format='%(asctime)s: %(levelname)s - %(message)s')
+    logging.basicConfig(level=10*args.verbosity, 
+                        format='%(asctime)s: %(levelname)s - %(message)s')
     if not os.path.isfile(args.experiment):
-        logging.log(logging.ERROR, 'No experiment file found at "{}", exiting.'.format(args.experiment))
+        logging.log(logging.ERROR, 
+                    'No experiment file found at "{}", exiting.'\
+                    .format(args.experiment))
         exit()
     logging.log(logging.INFO, 'Reading "{}".'.format(args.experiment))
     with open(args.experiment) as f:
         content = json.load(f)
-    grid = GridWorld(content, h_mult=args.m, search=args.search, timeout=args.timeout)
+    grid = GridWorld(content, 
+                     h_mult=args.m, 
+                     search=args.search, 
+                     timeout=args.timeout)
     grid.run()
     logging.log(logging.INFO, 'Writing "{}".'.format(args.experiment))
     with open(args.experiment, 'w') as f:
