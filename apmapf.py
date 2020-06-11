@@ -80,8 +80,10 @@ def IsConnected(path):
 def SamePosition(c0, c1):
     return And(Equals(c0[0], c1[0]), Equals(c0[1], c1[1]))
 
-# IntifyCoords takes a vector art in (R^2)^n and returns the closest vector to
-# it in (Z^2)^n.
+# pysmt uses its own wrapper for constants, in this case Int, imported from
+# pysmt.shortcuts.  So, although the input is already in (Z^2)^n, we still
+# need to change it to the "pysmt" version (Int(Z)^2)^n.
+# So, this is basically a moral isomorphism.
 def IntifyCoords(ary):
     return [[Int(c0), Int(c1)] for c0, c1 in ary]
 
@@ -178,7 +180,7 @@ def IsAttack(attack, plan, gridsize, obstacles, safes):
         [Not(SamePosition(coord, obstacle))
          for coord in attack for obstacle in obstacles])
 
-    # (7) Any time the attack is adjascent to some plan p, it is in the same 
+    # (7) Any time the attack is adjacent to some plan p, it is in the same 
     #     place as another plan p' and therefore could be mistaken for the
     #     innocent plan p'.
     #     i is the attacker, j the observer, k the time-step.
@@ -248,8 +250,10 @@ class GridWorld():
         
         logging.log(logging.INFO, 'Beginning search with horizon: {}'.format(H))
         
-        # H denotes the complexity we have checked 'up to', and H_MAX the
-        # complexity at which we can terminate.
+        # H denotes the horizon (makespan) we are currently checking.
+        # If H is too small, there will be no solution and the solver will
+        # return *unsat*.  H_MAX is the maximum possible horizon of the problem,
+        # as computed above using BFS.
         while H < H_MAX:
             # make the EF-SMT instance here
             plan = [[[Symbol('p_%d^%d-0' %
@@ -261,11 +265,11 @@ class GridWorld():
                                               i, INT)]
                       for i in range(H)]
 
-            # formula says that forall components of all coordinates in the
-            # attack, the plan is a valid plan, but the attack is not a valid
-            # attack.  So, a violation (which z3 would detect) would mean an
-            # attack.
-            # @Kacper can you double check this logic?
+            # There is an implicit "exists" quantifier out front on the plan 
+            # variables. We are asking the solver to determine if there exists a 
+            # model for the plan variables s.t. the plan is a valid MAPF 
+            # solution, and s.t. forall choices (in (Z^2)^H) for the attack
+            # variables, the attack is not a valid attack on the plan.
             formula = ForAll([symvar for coordinate in attack
                               for symvar in coordinate],
                              And(IsPlan(plan,
@@ -283,9 +287,8 @@ class GridWorld():
                 model = self.get_model(formula)
             except timeout_decorator.TimeoutError:
                 model = None
-            # If a model, i.e., a satisfaction of the formula, is recoverable,
-            # then we produce the solution.  This is of course within the H_MAX
-            # complexity bound.
+            # If the solver returns a sat result, we ask for a satisfying model.
+            # The makespan of the MAPF solution will be H (<= H_MAX).
             if model:
                 control = [[[model.get_py_value(plan[i][j][0]),
                              model.get_py_value(plan[i][j][1])]
